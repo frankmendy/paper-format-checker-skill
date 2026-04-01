@@ -18,14 +18,15 @@ description: "Automatically fixes research paper formatting based on '网络空�
 
 ## Steps
 1. Ask the user for the absolute file path to the paper to fix.
-2. Run the fixer script:
+2. Identify the absolute path of this skill (`<SKILL_PATH>`).
+3. Run the fixer script:
    - Windows:
-     - `python D:\Trae\paper_format_checker\scripts\paper_checker.py --file "<ABSOLUTE_FILE_PATH>"`
-3. The script will perform a three-part structured fix:
+     - `python <SKILL_PATH>\scripts\paper_checker.py --file "<ABSOLUTE_FILE_PATH>"`
+4. The script will perform a three-part structured fix:
    - **Part 1: Abstract Section**: Fixes formatting for Title, Abstract, and Keywords.
    - **Part 2: TOC Section**: Fixes formatting for Table of Contents levels (toc 1, 2, 3).
    - **Part 3: Body & Captions**: Fixes formatting for Headings (1-3), body text, image alignments, and table/figure captions.
-4. Report the completion and provide the path to the fixed file.
+5. Report the completion and provide the path to the fixed file.
 
 ## Notes
 - Original file remains untouched.
