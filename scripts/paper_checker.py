@@ -2085,10 +2085,9 @@ class PaperFixer:
             except Exception:
                 pass
             self._clear_paragraph_indents(para)
-            self._apply_custom_style(para, font_name="宋体", font_size=Pt(14), bold=False, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
-            # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中
-            for run in para.runs:
-                run.font.bold = False
+            self._apply_custom_style(para, font_name="宋体", font_size=Pt(14), bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
+            # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中，但是正文需要加粗，所以在这一步我们不取消 run 的加粗了
+            # 目录的加粗会在后处理脚本中被强行重写为不加粗
             para.paragraph_format.left_indent = Cm(0)
             self._force_paragraph_alignment(para, 'left')
             return True
@@ -2110,10 +2109,9 @@ class PaperFixer:
             except Exception:
                 pass
             self._clear_paragraph_indents(para)
-            self._apply_custom_style(para, font_name="宋体", font_size=Pt(15), bold=False, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
-            # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中
-            for run in para.runs:
-                run.font.bold = False
+            self._apply_custom_style(para, font_name="宋体", font_size=Pt(15), bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
+            # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中，但是正文需要加粗，所以在这一步我们不取消 run 的加粗了
+            # 目录的加粗会在后处理脚本中被强行重写为不加粗
             para.paragraph_format.left_indent = Cm(0)
             self._force_paragraph_alignment(para, 'left')
             return True
