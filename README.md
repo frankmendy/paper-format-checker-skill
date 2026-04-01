@@ -12,6 +12,27 @@
 
 本技能通过智能识别论文结构，自动修正字体、字号、对齐方式、缩进、行距、页码以及图表题注，确保最终输出的文档 100% 符合官方格式模板的要求。
 
+## 📦 安装指南 (Installation)
+
+本技能设计为 AI Agent 的扩展能力，推荐在 [Trae](https://www.trae.ai/) 或 [OpenClaw](https://github.com/openclaw/openclaw) 等支持 Tool/Skill 机制的 AI 编程助手或代理环境中使用。
+
+### 方式一：在 Trae 中安装（推荐）
+1. **下载 Trae**：前往 [Trae 官网 (trae.ai)](https://www.trae.ai/) 下载并安装适用于 Windows 的最新版 IDE。
+2. **导入技能**：
+   - 打开 Trae 的 AI 对话侧边栏。
+   - 点击聊天框上方的 **Skills**（技能）按钮，或者直接在聊天框输入 `/skill`。
+   - 在弹出的技能面板中，选择通过 GitHub/Gitee 仓库 URL 导入。
+   - 填入本仓库的地址（任选其一）：
+     - GitHub: `https://github.com/frankmendy/paper-format-checker-skill`
+     - Gitee: `https://gitee.com/frankmendy/paper-format-checker-skill`
+3. 安装完成后，即可在任意项目中随时唤起它为你排版论文。
+
+### 方式二：在 OpenClaw 等其他 AI Agent 中安装
+我们也强烈推荐在强大的开源 AI Agent 框架（如 **OpenClaw** 等）中挂载并使用本技能！
+- **安装步骤**：将本仓库克隆到本地，或根据你使用的 Agent 平台的扩展规范，将本仓库的 `SKILL.md` 和对应的 Python 脚本注册为一项本地 Tool/Skill。
+- **⚠️ 环境注意（跨平台必看）**：本技能依赖于底层的 **Windows 操作系统** 和 **Microsoft Word COM 接口** 来实现诸如“自动刷新目录页码”、“修复前导点”等高级排版功能。
+  - **如果你的 OpenClaw/Agent 运行在 Linux、macOS 或 WSL 无头环境中**：请在调用执行脚本时，加上 `--no_word_update` 参数以跳过强制调用 Word 的阶段。这样工具依然能完成 90% 的排版（正文、标题、摘要等），你只需将最终的 `_fixed.docx` 下载到 Windows 本地，打开并手动按 `F9` 键更新一次目录即可！
+
 ## 📖 使用教程 (Tutorial)
 
 使用本技能非常简单，只需通过自然语言与 Trae 交互即可完成所有排版工作。
