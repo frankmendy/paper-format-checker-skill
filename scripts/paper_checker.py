@@ -4,12 +4,49 @@ import re
 from copy import deepcopy
 from pathlib import Path
 import time
+
+# 依赖检查
+def check_dependencies():
+    """检查必要的依赖包是否已安装"""
+    missing_deps = []
+    
+    # 检查 python-docx
+    try:
+        import docx
+    except ImportError:
+        missing_deps.append("python-docx")
+    
+    # 检查 pywin32 (Windows only)
+    try:
+        import win32com.client
+    except ImportError:
+        missing_deps.append("pywin32")
+    
+    if missing_deps:
+        print("=" * 80)
+        print("❌ 错误：缺少必要的依赖包")
+        print("=" * 80)
+        print("\n请先安装以下依赖包：")
+        print(f"   pip install {' '.join(missing_deps)}")
+        print("\n或者安装所有依赖：")
+        print("   pip install python-docx pywin32")
+        print("\n依赖说明：")
+        print("   - python-docx: 用于读取和写入 Word 文档")
+        print("   - pywin32: 用于 Word COM 自动化（更新目录、刷新域等）")
+        print("=" * 80)
+        sys.exit(1)
+
+# 在导入其他模块前执行依赖检查
+check_dependencies()
+
+# 正常导入依赖
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.oxml.shared import OxmlElement
 
 TEMPLATE_NAME = "网络空间安全学院论文格式模板.docx"
 TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / TEMPLATE_NAME
@@ -120,10 +157,18 @@ class PaperFixer:
                 "\n".join(f"- {issue}" for issue in last_issues[:10])
             )
 
+        # 最终清理：确保所有二、三级标题的段前段后为自动
+        print("🔧 [最终清理] 确保二、三级标题段前段后为自动...")
+        self._final_cleanup_headings(doc)
+        
         # 保存
         output_path = paper_path.parent / f"{paper_path.stem}_fixed{paper_path.suffix}"
         doc.save(output_path)
         print(f"\n🚀 修复完成！文件已保存至: {output_path}")
+        
+        # 保存后验证：重新读取文件检查二、三级标题段前段后
+        print("🔍 [保存后验证] 重新读取文件检查二、三级标题段前段后...")
+        self._verify_after_save(output_path)
         if word_update_fields:
             self._try_update_word_fields(output_path)
             self._postprocess_word_toc_title_xml(output_path)
@@ -251,14 +296,8 @@ class PaperFixer:
 
             # 执行修正
             if current_part == "摘要":
-                ct = clean_text_for_state.upper()
-                is_front_matter = (
-                    ct.startswith("摘要") or ct.startswith("关键词") or
-                    ct.startswith("ABSTRACT") or ct.startswith("KEYWORDS")
-                )
-                if is_front_matter or self._is_abstract_content_para(para):
-                    if self._fix_abstract_para(para):
-                        self.pass_stats["abstract"] += 1
+                if self._fix_abstract_para(para):
+                    self.pass_stats["abstract"] += 1
             elif current_part == "目录":
                 if not text: continue
                 if self._fix_toc_para(para):
@@ -287,10 +326,60 @@ class PaperFixer:
         # 4. 专门处理表名与表格内容
         self._fix_tables(doc)
 
+        # 5. 最终收口：再次强制修正摘要/关键词这类“标题+正文同段”的 run 级样式
+        for para in doc.paragraphs:
+            clean = self._normalize_text(para.text)
+            if clean.startswith("摘要"):
+                self._force_mixed_label_run_format(para, "黑体", Pt(10.5), "楷体", Pt(10.5), body_ascii_font="Times New Roman")
+            elif clean.startswith("关键词"):
+                self._force_mixed_label_run_format(para, "黑体", Pt(10.5), "楷体", Pt(10.5), body_ascii_font="Times New Roman")
+            elif clean.upper().startswith("ABSTRACT"):
+                self._force_mixed_label_run_format(para, "Times New Roman", Pt(12), "Times New Roman", Pt(12))
+            elif clean.upper().startswith("KEYWORDS"):
+                self._force_mixed_label_run_format(para, "Times New Roman", Pt(12), "Times New Roman", Pt(12))
+
     def _normalize_text(self, text):
         if text is None:
             return ""
         return re.sub(r'[\s\u3000\u00A0]+', '', text)
+
+    def _force_mixed_label_run_format(self, para, title_font, title_size, body_font, body_size, title_ascii_font=None, body_ascii_font=None):
+        full_text = para.text or ""
+        if "：" not in full_text and ":" not in full_text:
+            return False
+
+        changed = False
+        passed_title = False
+        for run in para.runs:
+            if run._element is None:
+                continue
+
+            rpr = run._element.get_or_add_rPr()
+            if not passed_title:
+                self._set_run_font(run, font_name=title_font, font_size=title_size, bold=True, ascii_font=title_ascii_font or title_font)
+                for tag in ["b", "bCs"]:
+                    elem = rpr.find(qn(f"w:{tag}"))
+                    if elem is not None:
+                        rpr.remove(elem)
+                rpr.append(OxmlElement("w:b"))
+                rpr.append(OxmlElement("w:bCs"))
+                changed = True
+                if "：" in run.text or ":" in run.text:
+                    passed_title = True
+            else:
+                self._set_run_font(run, font_name=body_font, font_size=body_size, bold=False, ascii_font=body_ascii_font or body_font)
+                for tag in ["b", "bCs"]:
+                    elem = rpr.find(qn(f"w:{tag}"))
+                    if elem is not None:
+                        rpr.remove(elem)
+                b = OxmlElement("w:b")
+                b.set(qn("w:val"), "0")
+                rpr.append(b)
+                bcs = OxmlElement("w:bCs")
+                bcs.set(qn("w:val"), "0")
+                rpr.append(bcs)
+                changed = True
+        return changed
 
     def _count_word_toc_field_entries(self, doc):
         try:
@@ -1295,12 +1384,111 @@ class PaperFixer:
         if not clean_text:
             return issues
 
+        current_idx = getattr(para, '_index', -1)
+        cn_abstract_idx = getattr(para, '_cn_abstract_idx', -1)
+        abstract_idx = getattr(para, '_abstract_idx', -1)
+
+        # 摘要之前的中英文题目也属于前置部分，必须校验缩进归零与居中
+        if cn_abstract_idx > 0 and 0 <= current_idx < cn_abstract_idx and any('\u4e00' <= ch <= '\u9fff' for ch in para.text):
+            if not self._is_center_aligned(para):
+                issues.append(f"中文标题第 {idx + 1} 段未居中")
+            if not self._is_zero_length(para.paragraph_format.first_line_indent):
+                issues.append(f"中文标题第 {idx + 1} 段仍存在首行缩进")
+            if not self._is_zero_length(para.paragraph_format.left_indent):
+                issues.append(f"中文标题第 {idx + 1} 段仍存在左缩进")
+            return issues
+
+        if abstract_idx > 0 and 0 <= current_idx < abstract_idx and not any('\u4e00' <= ch <= '\u9fff' for ch in para.text):
+            if not self._is_center_aligned(para):
+                issues.append(f"英文标题第 {idx + 1} 段未居中")
+            if not self._is_zero_length(para.paragraph_format.first_line_indent):
+                issues.append(f"英文标题第 {idx + 1} 段仍存在首行缩进")
+            if not self._is_zero_length(para.paragraph_format.left_indent):
+                issues.append(f"英文标题第 {idx + 1} 段仍存在左缩进")
+            return issues
+
         if clean_text.startswith("摘要") or clean_text.startswith("关键词") or clean_text.upper().startswith("ABSTRACT") or clean_text.upper().startswith("KEYWORDS") or self._is_abstract_content_para(para):
             if not self._is_justify_aligned(para):
                 # 如果样式是被我们强制刷新过的兜底匹配，忽略它的误报
                 pass
             if para.paragraph_format.line_spacing is not None and not self._matches_line_spacing(para.paragraph_format.line_spacing, Pt(20)):
                 issues.append(f"摘要区第 {idx + 1} 段行距未按规则设为 20 磅")
+                
+            # 校验同一段落中“标题”与“内容”的加粗状态分离
+            if clean_text.startswith("摘要") or clean_text.startswith("关键词"):
+                full_text = para.text
+                if "：" in full_text or ":" in full_text:
+                    # 检查所有包含实际文本的 run，如果是“内容”部分，是否不加粗
+                    has_unbold_content = False
+                    has_bold_title = False
+                    has_bad_ascii_font = False
+                    passed_title = False
+                    for run in para.runs:
+                        run_text = run.text.strip()
+                        if not run_text: continue
+                        
+                        if not passed_title and ("摘" in run_text or "要" in run_text or "关" in run_text or "键" in run_text or "词" in run_text or ":" in run_text or "：" in run_text):
+                            is_bold = False
+                            if run.font.bold:
+                                is_bold = True
+                            elif run._element.rPr is not None and run._element.rPr.b is not None:
+                                val = run._element.rPr.b.get(qn('w:val'))
+                                # 如果有 b 标签，且没有 w:val="0" (或者类似明确表示 false 的属性)，那么它就是加粗的
+                                if val is None or str(val).lower() not in ['0', 'false']:
+                                    is_bold = True
+                            elif run._element.rPr is not None and run._element.rPr.find(qn('w:b')) is not None:
+                                val = run._element.rPr.find(qn('w:b')).get(qn('w:val'))
+                                if val is None or str(val).lower() not in ['0', 'false']:
+                                    is_bold = True # 存在无属性的 w:b 标签，或者属性非0，视为加粗
+                            elif run._element.rPr is not None and run._element.rPr.bCs is not None:
+                                val = run._element.rPr.bCs.get(qn('w:val'))
+                                if val is None or str(val).lower() not in ['0', 'false']:
+                                    is_bold = True
+                            elif run._element.rPr is not None and run._element.rPr.find(qn('w:bCs')) is not None:
+                                val = run._element.rPr.find(qn('w:bCs')).get(qn('w:val'))
+                                if val is None or str(val).lower() not in ['0', 'false']:
+                                    is_bold = True # 存在无属性的 w:bCs 标签，或者属性非0，视为加粗
+                            
+                            # DEBUG print
+                            # print(f"DEBUG Check bold for {run_text[:5]!r}: is_bold={is_bold}, b_tag={run._element.rPr.find(qn('w:b')) is not None if run._element.rPr is not None else False}, b_val={run._element.rPr.find(qn('w:b')).get(qn('w:val')) if run._element.rPr is not None and run._element.rPr.find(qn('w:b')) is not None else None}")
+
+                            if is_bold:
+                                has_bold_title = True
+                                
+                            if ":" in run_text or "：" in run_text:
+                                passed_title = True
+                        else:
+                            # 已经过了标题，这是内容部分的 run
+                            passed_title = True
+
+                            if re.search(r'[A-Za-z]', run_text):
+                                ascii_font = None
+                                if run._element.rPr is not None and run._element.rPr.rFonts is not None:
+                                    ascii_font = run._element.rPr.rFonts.get(qn('w:ascii')) or run._element.rPr.rFonts.get(qn('w:hAnsi'))
+                                if ascii_font is None:
+                                    ascii_font = run.font.name
+                                if ascii_font != "Times New Roman":
+                                    has_bad_ascii_font = True
+                            
+                            is_b_val_0 = False
+                            if run._element.rPr is not None and run._element.rPr.b is not None:
+                                if run._element.rPr.b.get(qn('w:val')) in ['0', 'false', 'False'] or run._element.rPr.b.get(qn('w:val')) == '0':
+                                    is_b_val_0 = True
+                            if run._element.rPr is not None and run._element.rPr.b is None:
+                                is_b_val_0 = True
+                                
+                            # 如果 run 没有设置粗体，或者被强行取消了粗体，视为不加粗
+                            if run.font.bold is False or is_b_val_0:
+                                has_unbold_content = True
+                                break
+                    
+                    if not has_bold_title:
+                        issues.append(f"摘要区第 {idx + 1} 段的标题部分（如'摘要：'）未加粗")
+                    if passed_title and not has_unbold_content:
+                        issues.append(f"摘要区第 {idx + 1} 段的正文内容不应加粗")
+                    if has_bad_ascii_font:
+                        issues.append(f"摘要区第 {idx + 1} 段的英文字符未使用 Times New Roman")
+                        
         return issues
 
     def _validate_toc_para(self, idx, para, clean_text):
@@ -1382,6 +1570,23 @@ class PaperFixer:
                 issues.append(f"正文二级标题第 {idx + 1} 段未左对齐")
             if not self._is_zero_length(para.paragraph_format.first_line_indent) or not self._is_zero_length(para.paragraph_format.left_indent):
                 issues.append(f"正文二级标题第 {idx + 1} 段仍存在缩进")
+            # 二级标题：段前段后自动(5磅)，行距固定20磅
+            # 检查XML中的实际配置
+            pPr = para._p.get_or_add_pPr()
+            spacing = pPr.find(qn('w:spacing'))
+            if spacing is not None:
+                before_val = spacing.get(qn('w:before'))
+                after_val = spacing.get(qn('w:after'))
+                before_auto = spacing.get(qn('w:beforeAutospacing'))
+                after_auto = spacing.get(qn('w:afterAutospacing'))
+                line_val = spacing.get(qn('w:line'))
+                # 正确的配置：before="100" beforeAutospacing="1" after="100" afterAutospacing="1" line="400"
+                if not (before_val == '100' and before_auto == '1' and 
+                       after_val == '100' and after_auto == '1' and
+                       line_val == '400'):
+                    issues.append(f"正文二级标题第 {idx + 1} 段段前段后间距配置不正确")
+            else:
+                issues.append(f"正文二级标题第 {idx + 1} 段未找到间距配置")
             return issues
 
         if self._is_body_heading3(para, text):
@@ -1389,6 +1594,23 @@ class PaperFixer:
                 issues.append(f"正文三级标题第 {idx + 1} 段未左对齐")
             if not self._is_zero_length(para.paragraph_format.first_line_indent) or not self._is_zero_length(para.paragraph_format.left_indent):
                 issues.append(f"正文三级标题第 {idx + 1} 段仍存在缩进")
+            # 三级标题：段前段后自动(5磅)，行距固定20磅
+            # 检查XML中的实际配置
+            pPr = para._p.get_or_add_pPr()
+            spacing = pPr.find(qn('w:spacing'))
+            if spacing is not None:
+                before_val = spacing.get(qn('w:before'))
+                after_val = spacing.get(qn('w:after'))
+                before_auto = spacing.get(qn('w:beforeAutospacing'))
+                after_auto = spacing.get(qn('w:afterAutospacing'))
+                line_val = spacing.get(qn('w:line'))
+                # 正确的配置：before="100" beforeAutospacing="1" after="100" afterAutospacing="1" line="400"
+                if not (before_val == '100' and before_auto == '1' and 
+                       after_val == '100' and after_auto == '1' and
+                       line_val == '400'):
+                    issues.append(f"正文三级标题第 {idx + 1} 段段前段后间距配置不正确")
+            else:
+                issues.append(f"正文三级标题第 {idx + 1} 段未找到间距配置")
             return issues
 
         if body_context == "参考文献" or (text.startswith("[") and len(text) > 1 and text[1].isdigit()):
@@ -1398,6 +1620,8 @@ class PaperFixer:
                 issues.append(f"参考文献第 {idx + 1} 段仍存在缩进")
             if not self._matches_line_spacing(para.paragraph_format.line_spacing, Pt(20)):
                 issues.append(f"参考文献第 {idx + 1} 段行距未保持 20 磅")
+            if para.paragraph_format.space_after is not None and not self._is_zero_length(para.paragraph_format.space_after):
+                issues.append(f"参考文献第 {idx + 1} 段段后间距未归零（当前 {para.paragraph_format.space_after.pt:.1f} 磅）")
             if run is not None:
                 if not self._font_matches(run, "楷体") and not self._font_matches(run, "Times New Roman") and not self._font_matches(run, "等线") and not self._font_matches(run, "Calibri"):
                     issues.append(f"参考文献第 {idx + 1} 段字体未保持楷体")
@@ -1543,6 +1767,322 @@ class PaperFixer:
         ind.set(qn('w:left'), '0')
         ind.set(qn('w:leftChars'), '0')
 
+    def _clear_paragraph_spacing(self, para, keep_line_spacing=True):
+        """清除段落间距（段前段后），实现真正的"自动"间距
+        
+        Args:
+            para: 段落对象
+            keep_line_spacing: 是否保留行距设置，默认为True
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        if spacing is not None:
+            if keep_line_spacing:
+                # 保留行距相关属性，只清除段前段后
+                # 获取当前的行距值
+                line_val = spacing.get(qn('w:line'))
+                line_rule = spacing.get(qn('w:lineRule'))
+                
+                # 清除spacing节点
+                pPr.remove(spacing)
+                
+                # 如果有行距值，重新创建spacing节点并设置行距
+                if line_val is not None or line_rule is not None:
+                    from docx.oxml import OxmlElement
+                    new_spacing = OxmlElement('w:spacing')
+                    if line_val is not None:
+                        new_spacing.set(qn('w:line'), line_val)
+                    if line_rule is not None:
+                        new_spacing.set(qn('w:lineRule'), line_rule)
+                    pPr.append(new_spacing)
+            else:
+                # 完全删除spacing节点，实现全部自动
+                pPr.remove(spacing)
+        
+        # 同时在python-docx层面清除
+        para.paragraph_format.space_before = None
+        para.paragraph_format.space_after = None
+
+    def _set_paragraph_line_spacing(self, para, line_spacing):
+        """使用底层XML设置段落行距，避免python-docx自动添加段前段后
+        
+        Args:
+            para: 段落对象
+            line_spacing: 行距值（Pt对象）
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        # 将磅值转换为twips（1磅 = 20 twips）
+        line_val = str(int(line_spacing.pt * 20))
+        
+        if spacing is None:
+            from docx.oxml import OxmlElement
+            spacing = OxmlElement('w:spacing')
+            pPr.append(spacing)
+        else:
+            # 清除现有的段前段后属性，确保真正为"自动"
+            for attr in [qn('w:before'), qn('w:beforeLines'), qn('w:beforeAutospacing'),
+                        qn('w:after'), qn('w:afterLines'), qn('w:afterAutospacing')]:
+                if attr in spacing.attrib:
+                    del spacing.attrib[attr]
+        
+        # 设置行距值和规则（固定值）
+        spacing.set(qn('w:line'), line_val)
+        spacing.set(qn('w:lineRule'), 'exact')
+        
+        # 确保不设置段前段后（设为0表示自动/无间距）
+        # 在Word中，不设置before/after属性或设为0都表示自动
+
+    def _clear_paragraph_spacing_and_set_line_spacing(self, para, line_spacing):
+        """清除段前段后间距并设置行距（合并操作，确保原子性）
+        
+        Args:
+            para: 段落对象
+            line_spacing: 行距值（Pt对象）
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        # 将磅值转换为twips（1磅 = 20 twips）
+        line_val = str(int(line_spacing.pt * 20))
+        
+        # 完全删除旧的spacing节点（彻底清除所有间距设置）
+        if spacing is not None:
+            pPr.remove(spacing)
+        
+        # 创建新的spacing节点，只包含行距设置
+        from docx.oxml import OxmlElement
+        new_spacing = OxmlElement('w:spacing')
+        new_spacing.set(qn('w:line'), line_val)
+        new_spacing.set(qn('w:lineRule'), 'exact')
+        # 注意：不设置before和after属性，确保段前段后为自动
+        pPr.append(new_spacing)
+        
+        # 同时在python-docx层面清除
+        para.paragraph_format.space_before = None
+        para.paragraph_format.space_after = None
+
+    def _clear_paragraph_spacing_xml(self, para):
+        """专门用于清除XML中的段前段后属性（保留行距设置）
+        
+        Args:
+            para: 段落对象
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        if spacing is not None:
+            # 获取当前行距设置
+            line_val = spacing.get(qn('w:line'))
+            line_rule = spacing.get(qn('w:lineRule'))
+            
+            # 完全删除spacing节点
+            pPr.remove(spacing)
+            
+            # 重新创建，只保留行距设置
+            from docx.oxml import OxmlElement
+            new_spacing = OxmlElement('w:spacing')
+            if line_val is not None:
+                new_spacing.set(qn('w:line'), line_val)
+            if line_rule is not None:
+                new_spacing.set(qn('w:lineRule'), line_rule)
+            pPr.append(new_spacing)
+        
+        # 同时在python-docx层面清除
+        para.paragraph_format.space_before = None
+        para.paragraph_format.space_after = None
+
+    def _set_paragraph_spacing_auto(self, para, line):
+        """使用底层XML设置段落间距（段前段后自动，行距固定）
+        
+        按照Word中"自动"的实际配置：
+        - before="100" beforeAutospacing="1" (5磅自动)
+        - after="100" afterAutospacing="1" (5磅自动)
+        - line="400" lineRule="exact" (20磅固定值)
+        
+        Args:
+            para: 段落对象
+            line: 行距（Pt对象）
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        # 将磅值转换为twips（1磅 = 20 twips）
+        line_val = str(int(line.pt * 20))
+        
+        # 完全删除旧的spacing节点
+        if spacing is not None:
+            pPr.remove(spacing)
+        
+        # 创建新的spacing节点，按照Word中"自动"的实际配置
+        from docx.oxml import OxmlElement
+        new_spacing = OxmlElement('w:spacing')
+        # 段前：100 twips (5磅) + 自动
+        new_spacing.set(qn('w:before'), '100')
+        new_spacing.set(qn('w:beforeAutospacing'), '1')
+        # 段后：100 twips (5磅) + 自动
+        new_spacing.set(qn('w:after'), '100')
+        new_spacing.set(qn('w:afterAutospacing'), '1')
+        # 行距：固定值20磅
+        new_spacing.set(qn('w:line'), line_val)
+        new_spacing.set(qn('w:lineRule'), 'exact')
+        pPr.append(new_spacing)
+        
+        # 同时在python-docx层面设置
+        from docx.shared import Pt
+        para.paragraph_format.space_before = Pt(5)  # 5磅
+        para.paragraph_format.space_after = Pt(5)   # 5磅
+        para.paragraph_format.line_spacing = line
+
+    def _final_cleanup_headings(self, doc):
+        """最终清理：确保所有二、三级标题的段前段后为自动(5磅)
+        
+        在保存文档前执行，按照正确的自动配置设置：
+        - before="100" beforeAutospacing="1" (5磅自动)
+        - after="100" afterAutospacing="1" (5磅自动)
+        - line="400" lineRule="exact" (20磅固定值)
+        """
+        cleanup_count = 0
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+            
+            # 检查是否为二、三级标题
+            is_heading2 = bool(re.match(r'^\d+[\.．]\d+(?![\.．]\d)', text))
+            is_heading3 = bool(re.match(r'^\d+[\.．]\d+[\.．]\d+', text))
+            
+            if is_heading2 or is_heading3:
+                heading_type = "二级标题" if is_heading2 else "三级标题"
+                pPr = para._p.get_or_add_pPr()
+                spacing = pPr.find(qn('w:spacing'))
+                
+                # 检查当前配置是否正确
+                is_correct = False
+                if spacing is not None:
+                    before_val = spacing.get(qn('w:before'))
+                    after_val = spacing.get(qn('w:after'))
+                    before_auto = spacing.get(qn('w:beforeAutospacing'))
+                    after_auto = spacing.get(qn('w:afterAutospacing'))
+                    line_val = spacing.get(qn('w:line'))
+                    
+                    is_correct = (before_val == '100' and before_auto == '1' and 
+                                 after_val == '100' and after_auto == '1' and
+                                 line_val == '400')
+                
+                if not is_correct:
+                    # 重新设置为正确的自动配置
+                    self._set_paragraph_spacing_auto(para, Pt(20))
+                    cleanup_count += 1
+                    text_preview = text[:20] if text else ""
+                    print(f"   🧹 {heading_type} [{text_preview}...] 已设置为自动(5磅)")
+        
+        if cleanup_count > 0:
+            print(f"   ✅ 已修复 {cleanup_count} 个标题的段前段后")
+        else:
+            print(f"   ✅ 所有标题段前段后配置正确，无需修复")
+
+    def _verify_after_save(self, output_path):
+        """保存后验证：重新读取文件检查二、三级标题段前段后是否为正确的自动配置"""
+        try:
+            verify_doc = Document(output_path)
+            issues = []
+            correct_count = 0
+            total_count = 0
+            
+            for idx, para in enumerate(verify_doc.paragraphs):
+                text = para.text.strip()
+                if not text:
+                    continue
+                
+                # 检查是否为二、三级标题
+                is_heading2 = bool(re.match(r'^\d+[\.．]\d+(?![\.．]\d)', text))
+                is_heading3 = bool(re.match(r'^\d+[\.．]\d+[\.．]\d+', text))
+                
+                if is_heading2 or is_heading3:
+                    total_count += 1
+                    heading_type = "二级标题" if is_heading2 else "三级标题"
+                    pPr = para._p.get_or_add_pPr()
+                    spacing = pPr.find(qn('w:spacing'))
+                    
+                    if spacing is not None:
+                        before_val = spacing.get(qn('w:before'))
+                        after_val = spacing.get(qn('w:after'))
+                        before_auto = spacing.get(qn('w:beforeAutospacing'))
+                        after_auto = spacing.get(qn('w:afterAutospacing'))
+                        line_val = spacing.get(qn('w:line'))
+                        
+                        # 检查是否为正确的自动配置
+                        is_correct = (before_val == '100' and before_auto == '1' and 
+                                     after_val == '100' and after_auto == '1' and
+                                     line_val == '400')
+                        
+                        if is_correct:
+                            correct_count += 1
+                        else:
+                            before_pt = int(before_val) / 20 if before_val else 0
+                            after_pt = int(after_val) / 20 if after_val else 0
+                            text_preview = text[:20] if text else ""
+                            issues.append(f"{heading_type} [{text_preview}...] 段前={before_pt}磅(自动={before_auto}), 段后={after_pt}磅(自动={after_auto})")
+                    else:
+                        text_preview = text[:20] if text else ""
+                        issues.append(f"{heading_type} [{text_preview}...] 未找到间距配置")
+            
+            if issues:
+                print(f"   ⚠️ 发现 {len(issues)} 个标题配置不正确:")
+                for issue in issues[:5]:
+                    print(f"      - {issue}")
+                if len(issues) > 5:
+                    print(f"      ... 还有 {len(issues) - 5} 个")
+            else:
+                print(f"   ✅ 全部 {total_count} 个二、三级标题配置正确（段前段后自动5磅，行距20磅）")
+                
+        except Exception as e:
+            print(f"   ⚠️ 保存后验证失败: {e}")
+
+    def _verify_heading_spacing_auto(self, para, heading_type):
+        """验证标题段前段后是否为自动（按照Word实际配置）
+        
+        正确的自动配置应该是：
+        - before="100" beforeAutospacing="1" (5磅自动)
+        - after="100" afterAutospacing="1" (5磅自动)
+        - line="400" lineRule="exact" (20磅固定值)
+        
+        Args:
+            para: 段落对象
+            heading_type: 标题类型（用于调试输出）
+        """
+        pPr = para._p.get_or_add_pPr()
+        spacing = pPr.find(qn('w:spacing'))
+        
+        # 获取段前段后值（用于调试）
+        before_val = spacing.get(qn('w:before')) if spacing is not None else None
+        after_val = spacing.get(qn('w:after')) if spacing is not None else None
+        before_auto = spacing.get(qn('w:beforeAutospacing')) if spacing is not None else None
+        after_auto = spacing.get(qn('w:afterAutospacing')) if spacing is not None else None
+        line_val = spacing.get(qn('w:line')) if spacing is not None else None
+        
+        # 转换为磅值（twips / 20）
+        before_pt = int(before_val) / 20 if before_val else 0
+        after_pt = int(after_val) / 20 if after_val else 0
+        line_pt = int(line_val) / 20 if line_val else 0
+        
+        text_preview = para.text[:20] if para.text else ""
+        
+        # 检查是否为正确的自动配置
+        is_correct = (before_val == '100' and before_auto == '1' and 
+                     after_val == '100' and after_auto == '1' and
+                     line_val == '400')
+        
+        if is_correct:
+            print(f"🔍 {heading_type} [{text_preview}...] 自动(5磅), 行距={line_pt}磅 ✅")
+        else:
+            print(f"🔍 {heading_type} [{text_preview}...] 段前={before_pt}磅(自动={before_auto}), 段后={after_pt}磅(自动={after_auto}), 行距={line_pt}磅")
+            print(f"⚠️ 警告: {heading_type} 配置不正确，重新设置...")
+            self._set_paragraph_spacing_auto(para, Pt(20))
+
     def _force_paragraph_alignment(self, para, alignment_value):
         pPr = para._p.get_or_add_pPr()
         jc = pPr.find(qn('w:jc'))
@@ -1616,6 +2156,7 @@ class PaperFixer:
                      # 中文题目：三号宋体加粗，居中
                      self._clear_paragraph_indents(para)
                      self._apply_custom_style(para, font_name="宋体", font_size=Pt(16), bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                     print(f"DEBUG: Fixed CN title at {current_idx}, text: {text[:10]}..., set firstLineIndent to 0")
                  return True
         # ---------------------
 
@@ -1626,26 +2167,120 @@ class PaperFixer:
             para.paragraph_format.first_line_indent = Pt(21) # 首行缩进2字符
             para.paragraph_format.line_spacing = Pt(20) # 固定行距 20 磅
             
-            # 使用一个标志位来判断是否已经过了“摘要：”部分
-            passed_title = False
-            for run in para.runs:
-                run_text = run.text.strip()
-                if not run_text: continue
+            # 清除段落级别的样式加粗属性，避免覆盖 run
+            self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), bold=False)
+            para.style = para.part.document.styles['Normal'] # 重置样式为 Normal，切断与原标题样式的继承
+            self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), bold=False)
+            
+            if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                if para._element.pPr.rPr.b is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                if para._element.pPr.rPr.bCs is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+            
+            # 由于一个 run 里可能既包含“摘要：”又包含后续正文，必须先对 run 进行拆分！
+            # 否则如果 "摘要：正文" 都在同一个 run 里，它要么全黑体，要么全楷体。
+            
+            # 方案：收集整个段落的文本，然后清空原有的 run，重新创建两个 run
+            full_text = para.text # para.text 才是最原始获取所有文本的最安全方式
+            
+            # 由于可能出现多次重写导致 para.runs 引用错乱，需要先提取出文本，再直接清空子节点
+            text_val = full_text
+            match = re.match(r'^([\s\u3000]*摘\s*要\s*[:：])(.*)$', text_val, flags=re.DOTALL)
+            if match:
+                title_part = match.group(1)
+                content_part = match.group(2)
                 
-                # 如果还没过标题，并且这个 run 包含 "摘要" 或冒号
-                if not passed_title and ("摘" in run_text or "要" in run_text or ":" in run_text or "：" in run_text):
-                    run.font.name = "黑体"
-                    run.font.size = Pt(10.5) # 五号
-                    run.font.bold = True
-                    # 如果这个 run 里包含了冒号，说明后面的内容就是正文了
-                    if ":" in run_text or "：" in run_text:
-                        passed_title = True
-                else:
-                    # 摘要内容
-                    passed_title = True # 只要遇到了非标题的内容，后面肯定全是内容
-                    run.font.name = "楷体"
-                    run.font.size = Pt(10.5) # 五号
-                    run.font.bold = False
+                # 最彻底的修复方式：清空原段落并写入，同时剥离所有段落样式，回归底层
+                para.clear()
+                # 重新应用一次自定义样式以覆盖之前的清空
+                para.style = para.part.document.styles['Normal']
+                self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), bold=False)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                para.paragraph_format.first_line_indent = Pt(21)
+                para.paragraph_format.line_spacing = Pt(20)
+                
+                # 强行移除段落级别的任何 rPr，防止继承粗体
+                if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                    if para._element.pPr.rPr.b is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                    if para._element.pPr.rPr.bCs is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+                
+                # 分解 "摘 要：" 以避免特殊匹配失败
+                run_title = para.add_run(title_part)
+                run_title.font.name = "黑体"
+                run_title._element.rPr.rFonts.set(qn('w:eastAsia'), '黑体')
+                run_title.font.size = Pt(10.5)
+                run_title.bold = True
+                run_title.font.bold = True
+                
+                if run_title._element.rPr is None:
+                    run_title._element.get_or_add_rPr()
+                # 强制添加加粗属性以覆盖 Normal 样式的影响
+                for tag in ['b', 'bCs']:
+                    elem = run_title._element.rPr.find(qn(f'w:{tag}'))
+                    if elem is not None:
+                        run_title._element.rPr.remove(elem)
+                        
+                b = OxmlElement('w:b')
+                b.set(qn('w:val'), '1')
+                run_title._element.rPr.append(b)
+                bCs = OxmlElement('w:bCs')
+                bCs.set(qn('w:val'), '1')
+                run_title._element.rPr.append(bCs)
+                
+                if content_part:
+                    run_content = para.add_run(content_part)
+                    self._set_run_font(run_content, font_name="楷体", font_size=Pt(10.5), bold=False, ascii_font="Times New Roman")
+                    
+                    if run_content._element.rPr is None:
+                        run_content._element.get_or_add_rPr()
+                    
+                    # 彻底清理可能导致加粗的底层元素
+                    for tag in ['b', 'bCs']:
+                        elem = run_content._element.rPr.find(qn(f'w:{tag}'))
+                        if elem is not None:
+                            run_content._element.rPr.remove(elem)
+                    
+                    b = OxmlElement('w:b')
+                    b.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(b)
+                    bCs = OxmlElement('w:bCs')
+                    bCs.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(bCs)
+
+                # 最后再按“标题/正文”分段强制覆盖一次，处理 Word 把 tab 拆成多个 run 的情况
+                passed_title = False
+                for run in para.runs:
+                    rpr = run._element.get_or_add_rPr()
+                    if not passed_title:
+                        run.font.name = "黑体"
+                        rpr.rFonts.set(qn('w:eastAsia'), '黑体')
+                        run.font.size = Pt(10.5)
+                        run.bold = True
+                        run.font.bold = True
+                        for tag in ['b', 'bCs']:
+                            elem = rpr.find(qn(f'w:{tag}'))
+                            if elem is not None:
+                                rpr.remove(elem)
+                        rpr.append(OxmlElement('w:b'))
+                        rpr.append(OxmlElement('w:bCs'))
+                        if "：" in run.text or ":" in run.text:
+                            passed_title = True
+                    else:
+                        self._set_run_font(run, font_name="楷体", font_size=Pt(10.5), bold=False, ascii_font="Times New Roman")
+                        for tag in ['b', 'bCs']:
+                            elem = rpr.find(qn(f'w:{tag}'))
+                            if elem is not None:
+                                rpr.remove(elem)
+                        b = OxmlElement('w:b')
+                        b.set(qn('w:val'), '0')
+                        rpr.append(b)
+                        bCs = OxmlElement('w:bCs')
+                        bCs.set(qn('w:val'), '0')
+                        rpr.append(bCs)
+                
             return True
 
         # 处理中文关键词段落
@@ -1654,22 +2289,106 @@ class PaperFixer:
             para.paragraph_format.first_line_indent = Pt(21)
             para.paragraph_format.line_spacing = Pt(20)
             
-            passed_title = False
-            for run in para.runs:
-                run_text = run.text.strip()
-                if not run_text: continue
+            para.style = para.part.document.styles['Normal']
+            self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), bold=False)
+            if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                if para._element.pPr.rPr.b is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                if para._element.pPr.rPr.bCs is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+            
+            text_val = para.text
+            match = re.match(r'^([\s\u3000]*关\s*键\s*词\s*[:：])(.*)$', text_val, flags=re.DOTALL)
+            if match:
+                title_part = match.group(1)
+                content_part = match.group(2)
                 
-                if not passed_title and ("关键词" in run_text or "关" in run_text or "键" in run_text or "词" in run_text or ":" in run_text or "：" in run_text):
-                    run.font.name = "黑体"
-                    run.font.size = Pt(10.5)
-                    run.font.bold = True
-                    if ":" in run_text or "：" in run_text:
-                        passed_title = True
-                else:
-                    passed_title = True
-                    run.font.name = "楷体"
-                    run.font.size = Pt(10.5)
-                    run.font.bold = False
+                para.clear()
+                para.style = para.part.document.styles['Normal']
+                self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), bold=False)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                para.paragraph_format.first_line_indent = Pt(21)
+                para.paragraph_format.line_spacing = Pt(20)
+                
+                if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                    if para._element.pPr.rPr.b is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                    if para._element.pPr.rPr.bCs is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+                
+                run_title = para.add_run(title_part)
+                run_title.font.name = "黑体"
+                run_title._element.rPr.rFonts.set(qn('w:eastAsia'), '黑体')
+                run_title.font.size = Pt(10.5)
+                run_title.bold = True
+                run_title.font.bold = True
+                
+                if run_title._element.rPr is None:
+                    run_title._element.get_or_add_rPr()
+                # 强制添加加粗属性以覆盖 Normal 样式的影响
+                for tag in ['b', 'bCs']:
+                    elem = run_title._element.rPr.find(qn(f'w:{tag}'))
+                    if elem is not None:
+                        run_title._element.rPr.remove(elem)
+                        
+                b = OxmlElement('w:b')
+                b.set(qn('w:val'), '1')
+                run_title._element.rPr.append(b)
+                
+                bCs = OxmlElement('w:bCs')
+                bCs.set(qn('w:val'), '1')
+                run_title._element.rPr.append(bCs)
+                
+                if content_part:
+                    run_content = para.add_run(content_part)
+                    self._set_run_font(run_content, font_name="楷体", font_size=Pt(10.5), bold=False, ascii_font="Times New Roman")
+                    
+                    if run_content._element.rPr is None:
+                        run_content._element.get_or_add_rPr()
+                        
+                    for tag in ['b', 'bCs']:
+                        elem = run_content._element.rPr.find(qn(f'w:{tag}'))
+                        if elem is not None:
+                            run_content._element.rPr.remove(elem)
+                            
+                    b = OxmlElement('w:b')
+                    b.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(b)
+                    bCs = OxmlElement('w:bCs')
+                    bCs.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(bCs)
+
+                # 处理被 Word 自动拆分的 run，确保标题加粗、正文取消加粗
+                passed_title = False
+                for run in para.runs:
+                    rpr = run._element.get_or_add_rPr()
+                    if not passed_title:
+                        run.font.name = "黑体"
+                        rpr.rFonts.set(qn('w:eastAsia'), '黑体')
+                        run.font.size = Pt(10.5)
+                        run.bold = True
+                        run.font.bold = True
+                        for tag in ['b', 'bCs']:
+                            elem = rpr.find(qn(f'w:{tag}'))
+                            if elem is not None:
+                                rpr.remove(elem)
+                        rpr.append(OxmlElement('w:b'))
+                        rpr.append(OxmlElement('w:bCs'))
+                        if "：" in run.text or ":" in run.text:
+                            passed_title = True
+                    else:
+                        self._set_run_font(run, font_name="楷体", font_size=Pt(10.5), bold=False, ascii_font="Times New Roman")
+                        for tag in ['b', 'bCs']:
+                            elem = rpr.find(qn(f'w:{tag}'))
+                            if elem is not None:
+                                rpr.remove(elem)
+                        b = OxmlElement('w:b')
+                        b.set(qn('w:val'), '0')
+                        rpr.append(b)
+                        bCs = OxmlElement('w:bCs')
+                        bCs.set(qn('w:val'), '0')
+                        rpr.append(bCs)
+                
             return True
              
         # 处理英文 Abstract 段落
@@ -1678,22 +2397,77 @@ class PaperFixer:
             para.paragraph_format.first_line_indent = Pt(24) # 小四大概12pt，两字符24pt
             para.paragraph_format.line_spacing = Pt(20)
             
-            passed_title = False
-            for run in para.runs:
-                run_text = run.text.strip()
-                if not run_text: continue
+            para.style = para.part.document.styles['Normal']
+            self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(12), bold=False)
+            if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                if para._element.pPr.rPr.b is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                if para._element.pPr.rPr.bCs is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+            
+            text_val = para.text
+            match = re.match(r'^([\s\u3000]*[aA][bB][sS][tT][rR][aA][cC][tT]\s*[:：])(.*)$', text_val, flags=re.DOTALL)
+            if match:
+                title_part = match.group(1)
+                content_part = match.group(2)
                 
-                if not passed_title and ("ABSTRACT" in run_text.upper() or ":" in run_text or "：" in run_text):
-                    run.font.name = "Times New Roman"
-                    run.font.size = Pt(12) # 小四
-                    run.font.bold = True
-                    if ":" in run_text or "：" in run_text:
-                        passed_title = True
-                else:
-                    passed_title = True
-                    run.font.name = "Times New Roman"
-                    run.font.size = Pt(12)
-                    run.font.bold = False
+                para.clear()
+                para.style = para.part.document.styles['Normal']
+                self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(12), bold=False)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                para.paragraph_format.first_line_indent = Pt(24)
+                para.paragraph_format.line_spacing = Pt(20)
+                
+                if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                    if para._element.pPr.rPr.b is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                    if para._element.pPr.rPr.bCs is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+                
+                run_title = para.add_run(title_part)
+                run_title.font.name = "Times New Roman"
+                run_title._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+                run_title.font.size = Pt(12)
+                run_title.bold = True
+                run_title.font.bold = True
+                
+                if run_title._element.rPr is None:
+                    run_title._element.get_or_add_rPr()
+                # 强制添加加粗属性以覆盖 Normal 样式的影响
+                for tag in ['b', 'bCs']:
+                    elem = run_title._element.rPr.find(qn(f'w:{tag}'))
+                    if elem is not None:
+                        run_title._element.rPr.remove(elem)
+                        
+                b = OxmlElement('w:b')
+                run_title._element.rPr.append(b)
+                
+                bCs = OxmlElement('w:bCs')
+                run_title._element.rPr.append(bCs)
+                
+                if content_part:
+                    run_content = para.add_run(content_part)
+                    run_content.font.name = "Times New Roman"
+                    run_content._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+                    run_content.font.size = Pt(12)
+                    run_content.bold = False
+                    run_content.font.bold = False
+                    
+                    if run_content._element.rPr is None:
+                        run_content._element.get_or_add_rPr()
+                        
+                    for tag in ['b', 'bCs']:
+                        elem = run_content._element.rPr.find(qn(f'w:{tag}'))
+                        if elem is not None:
+                            run_content._element.rPr.remove(elem)
+                            
+                    b = OxmlElement('w:b')
+                    b.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(b)
+                    bCs = OxmlElement('w:bCs')
+                    bCs.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(bCs)
+                
             return True
              
         # 处理英文 Key words 段落
@@ -1702,26 +2476,82 @@ class PaperFixer:
             para.paragraph_format.first_line_indent = Pt(24)
             para.paragraph_format.line_spacing = Pt(20)
             
-            passed_title = False
-            for run in para.runs:
-                run_text = run.text.strip()
-                if not run_text: continue
+            para.style = para.part.document.styles['Normal']
+            self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(12), bold=False)
+            if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                if para._element.pPr.rPr.b is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                if para._element.pPr.rPr.bCs is not None:
+                    para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+            
+            text_val = para.text
+            match = re.match(r'^([\s\u3000]*[kK][eE][yY]\s*[wW][oO][rR][dD][sS]\s*[:：])(.*)$', text_val, flags=re.DOTALL)
+            if match:
+                title_part = match.group(1)
+                content_part = match.group(2)
                 
-                if not passed_title and ("KEY" in run_text.upper() or "WORD" in run_text.upper() or ":" in run_text or "：" in run_text):
-                    run.font.name = "Times New Roman"
-                    run.font.size = Pt(12)
-                    run.font.bold = True
-                    if ":" in run_text or "：" in run_text:
-                        passed_title = True
-                else:
-                    passed_title = True
-                    run.font.name = "Times New Roman"
-                    run.font.size = Pt(12)
-                    run.font.bold = False
+                para.clear()
+                para.style = para.part.document.styles['Normal']
+                self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(12), bold=False)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                para.paragraph_format.first_line_indent = Pt(24)
+                para.paragraph_format.line_spacing = Pt(20)
+                
+                if para._element.pPr is not None and hasattr(para._element.pPr, 'rPr') and para._element.pPr.rPr is not None:
+                    if para._element.pPr.rPr.b is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.b)
+                    if para._element.pPr.rPr.bCs is not None:
+                        para._element.pPr.rPr.remove(para._element.pPr.rPr.bCs)
+                
+                run_title = para.add_run(title_part)
+                run_title.font.name = "Times New Roman"
+                run_title._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+                run_title.font.size = Pt(12)
+                run_title.bold = True
+                run_title.font.bold = True
+                
+                if run_title._element.rPr is None:
+                    run_title._element.get_or_add_rPr()
+                # 强制添加加粗属性以覆盖 Normal 样式的影响
+                for tag in ['b', 'bCs']:
+                    elem = run_title._element.rPr.find(qn(f'w:{tag}'))
+                    if elem is not None:
+                        run_title._element.rPr.remove(elem)
+                        
+                b = OxmlElement('w:b')
+                run_title._element.rPr.append(b)
+                
+                bCs = OxmlElement('w:bCs')
+                run_title._element.rPr.append(bCs)
+                
+                if content_part:
+                    run_content = para.add_run(content_part)
+                    run_content.font.name = "Times New Roman"
+                    run_content._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+                    run_content.font.size = Pt(12)
+                    run_content.bold = False
+                    run_content.font.bold = False
+                    
+                    if run_content._element.rPr is None:
+                        run_content._element.get_or_add_rPr()
+                        
+                    for tag in ['b', 'bCs']:
+                        elem = run_content._element.rPr.find(qn(f'w:{tag}'))
+                        if elem is not None:
+                            run_content._element.rPr.remove(elem)
+                            
+                    b = OxmlElement('w:b')
+                    b.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(b)
+                    bCs = OxmlElement('w:bCs')
+                    bCs.set(qn('w:val'), '0')
+                    run_content._element.rPr.append(bCs)
+                
             return True
 
         if is_abstract_content_para:
             has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+            para.style = para.part.document.styles['Normal']
             if has_chinese:
                 self._apply_custom_style(
                     para,
@@ -1743,6 +2573,19 @@ class PaperFixer:
             self._force_paragraph_alignment(para, 'both')
             for run in para.runs:
                 run.font.bold = False
+                run.bold = False
+                if run._element.rPr is not None:
+                    for tag in ['b', 'bCs']:
+                        elem = run._element.rPr.find(qn(f'w:{tag}'))
+                        if elem is not None:
+                            run._element.rPr.remove(elem)
+                            
+                    b = OxmlElement('w:b')
+                    b.set(qn('w:val'), '0')
+                    run._element.rPr.append(b)
+                    bCs = OxmlElement('w:bCs')
+                    bCs.set(qn('w:val'), '0')
+                    run._element.rPr.append(bCs)
             return True
 
         # 1. 论文题目兜底识别 (如果前面的精准识别没起作用)
@@ -1756,12 +2599,9 @@ class PaperFixer:
                      self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(16), bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER)
                  return True
 
-        # 兜底：如果摘要内容是换行独立成段的
-        if any('\u4e00' <= char <= '\u9fff' for char in text):
-             self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), line_spacing=Pt(20), first_line_indent=Pt(21))
-        else:
-             self._apply_custom_style(para, font_name="Times New Roman", font_size=Pt(12), line_spacing=Pt(20), first_line_indent=Pt(24))
-        return True
+        # 这里不能再做“全局摘要兜底”，否则会把前面已经修好的“摘要：/关键词：”标题
+        # 再次统一改成不加粗。独立成段的摘要正文已经由 `is_abstract_content_para` 分支处理。
+        return False
 
     def _fix_toc_para(self, para, doc=None):
         """
@@ -2080,16 +2920,24 @@ class PaperFixer:
                         run.text = ""
                 else:
                     para.add_run(fixed_text)
+            self._clear_paragraph_indents(para)
+            # 三级标题：段前段后自动，行距固定20磅
+            # 不使用Heading 3样式（因为样式自带段前段后），改用Normal样式并手动设置所有格式
             try:
-                para.style = "Heading 3"
+                para.style = "Normal"
             except Exception:
                 pass
-            self._clear_paragraph_indents(para)
-            self._apply_custom_style(para, font_name="宋体", font_size=Pt(14), bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
+            # 先设置字体等样式（不设置alignment和line_spacing，避免触发python-docx的默认段前段后）
+            self._apply_custom_style(para, font_name="宋体", font_size=Pt(14), bold=True)
             # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中，但是正文需要加粗，所以在这一步我们不取消 run 的加粗了
             # 目录的加粗会在后处理脚本中被强行重写为不加粗
             para.paragraph_format.left_indent = Cm(0)
+            para.paragraph_format.first_line_indent = Cm(0)
+            # 使用底层XML设置段前段后为自动（不设置before/after属性），行距固定20磅
+            self._set_paragraph_spacing_auto(para, line=Pt(20))
             self._force_paragraph_alignment(para, 'left')
+            # 自检：验证段前段后是否真正为自动
+            self._verify_heading_spacing_auto(para, "三级标题")
             return True
         elif re.match(r'^\d+[\.．]\d+(?![\.．]\d)', text):
             # 将全角点号归一化，并确保编号与文字紧贴
@@ -2104,16 +2952,24 @@ class PaperFixer:
                         run.text = ""
                 else:
                     para.add_run(fixed_text)
+            self._clear_paragraph_indents(para)
+            # 二级标题：段前段后自动，行距固定20磅
+            # 不使用Heading 2样式（因为样式自带段前段后），改用Normal样式并手动设置所有格式
             try:
-                para.style = "Heading 2"
+                para.style = "Normal"
             except Exception:
                 pass
-            self._clear_paragraph_indents(para)
-            self._apply_custom_style(para, font_name="宋体", font_size=Pt(15), bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, first_line_indent=Cm(0))
+            # 先设置字体等样式（不设置alignment和line_spacing，避免触发python-docx的默认段前段后）
+            self._apply_custom_style(para, font_name="宋体", font_size=Pt(15), bold=True)
             # 强制清空 runs 级别的加粗属性，避免被 Word 继承到目录中，但是正文需要加粗，所以在这一步我们不取消 run 的加粗了
             # 目录的加粗会在后处理脚本中被强行重写为不加粗
             para.paragraph_format.left_indent = Cm(0)
+            para.paragraph_format.first_line_indent = Cm(0)
+            # 使用底层XML设置段前段后为自动（不设置before/after属性），行距固定20磅
+            self._set_paragraph_spacing_auto(para, line=Pt(20))
             self._force_paragraph_alignment(para, 'left')
+            # 自检：验证段前段后是否真正为自动
+            self._verify_heading_spacing_auto(para, "二级标题")
             return True
         
         # 2. 特殊章节标题 (致谢、参考文献、附录) - 三号宋体，加粗，居中
@@ -2165,7 +3021,7 @@ class PaperFixer:
             self._force_paragraph_alignment(para, 'center')
             return True
 
-        # 3. 参考文献内容 - 五号楷体，顶格，两端对齐
+        # 3. 参考文献内容 - 五号楷体，顶格，两端对齐，段后0磅
         elif body_context == "参考文献" or (text.startswith("[") and len(text) > 1 and text[1].isdigit()):
             try:
                 para.style = "Normal"
@@ -2174,6 +3030,7 @@ class PaperFixer:
             self._clear_paragraph_indents(para)
             self._apply_custom_style(para, font_name="楷体", font_size=Pt(10.5), alignment=WD_ALIGN_PARAGRAPH.JUSTIFY, line_spacing=Pt(20), first_line_indent=Cm(0))
             para.paragraph_format.left_indent = Cm(0)
+            para.paragraph_format.space_after = Pt(0)
             self._force_paragraph_alignment(para, 'both')
             return True
 

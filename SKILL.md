@@ -13,6 +13,23 @@ description: "Automatically fixes research paper formatting based on '网络空�
 - The user asks to fix, format, or correct a paper's layout according to the template.
 - The user wants the document margins, line spacing, and styles to be automatically updated for specific sections (Abstract, TOC, Body).
 
+## Prerequisites / Dependencies
+
+### Required Python Packages
+Before running the fixer, ensure the following Python packages are installed:
+
+```bash
+pip install python-docx pywin32
+```
+
+**Package Details:**
+- **python-docx** (>=0.8.11): Core library for reading and writing Word documents
+- **pywin32** (>=227): Required for Word COM automation on Windows (used for updating TOC fields and post-processing)
+
+### System Requirements
+- **Operating System**: Windows (required for Word COM automation features)
+- **Microsoft Word**: Installed and accessible (required for automatic TOC update and field refresh)
+
 ## Inputs
 - Absolute path to the target document file (.docx).
 
@@ -32,4 +49,5 @@ description: "Automatically fixes research paper formatting based on '网络空�
 - Original file remains untouched.
 - Only `.docx` files are supported.
 - Captions for figures must be below the image, and table captions must be above the table (script ensures standard alignment).
+- If dependencies are missing, the script will display installation instructions and exit.
 
